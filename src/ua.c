@@ -944,6 +944,9 @@ int ua_call_alloc(struct call **callp, struct ua *ua,
 	if (err)
 		return err;
 
+	/* Per-UA headers are still copied onto the call. Global headers are
+	 * printed directly by call.c so they can change at run time.
+	 */
 	if (!list_isempty(&ua->custom_hdrs))
 		call_set_custom_hdrs(*callp, &ua->custom_hdrs);
 

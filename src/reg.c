@@ -253,8 +253,9 @@ int reg_register(struct reg *reg, const char *reg_uri, const char *params,
 			      sip_auth_handler, acc, true,
 			      register_handler, reg,
 			      params[0] ? &params[1] : NULL,
-			      "Allow: %H\r\n%H",
+			      "Allow: %H\r\n%H%H",
 			      ua_print_allowed, reg->ua,
+			      custom_hdrs_print, uag_custom_hdrs(true),
 			      custom_hdrs_print, &reg->custom_hdrs);
 	if (err)
 		return err;

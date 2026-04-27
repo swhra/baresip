@@ -183,6 +183,12 @@ void call_set_custom_hdrs(struct call *call, const struct list *hdrs);
 const struct sa *call_laddr(const struct call *call);
 int call_streams_alloc(struct call *call);
 int call_modify_nosdp(struct call *call);
+int call_debug_full(struct re_printf *pf, const struct call *call);
+int call_debug_sip(struct re_printf *pf, const struct call *call);
+
+int custom_hdrs_add(struct list *hdrs, const char *name,
+		    const char *fmt, ...);
+int custom_hdrs_apply(const struct list *hdrs, custom_hdrs_h *h, void *arg);
 
 /*
 * Custom headers
@@ -393,6 +399,12 @@ struct uag {
 	bool nodial;                   /**< Prevent outgoing calls          */
 	void *arg;                     /**< UA Exit handler argument        */
 	char *eprm;                    /**< Extra UA parameters             */
+	struct list custom_hdrs;        /**< Global out-of-dialog/call hdrs  */
+	struct list custom_reg_hdrs;    /**< Global REGISTER headers         */
+	bool sip_trace_enabled;         /**< SIP trace active                */
+	bool sip_trace_color;           /**< Colour SIP trace on stdout      */
+	void *sip_trace_file;           /**< Optional SIP trace FILE*        */
+	char *sip_trace_path;           /**< Path for optional trace file    */
 #ifdef USE_TLS
 	struct tls *tls;               /**< TLS Context                     */
 	struct tls *wss_tls;           /**< Secure websocket TLS Context    */

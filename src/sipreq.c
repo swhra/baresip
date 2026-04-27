@@ -94,7 +94,8 @@ static int request(struct sip_req *sr)
 {
 	return sip_drequestf(&sr->req, uag_sip(), true, sr->method, sr->dlg,
 			     0, sr->auth, NULL, resp_handler,
-			     sr, sr->fmt ? "%s" : NULL, sr->fmt);
+			     sr, sr->fmt ? "%H%s" : "%H",
+			     custom_hdrs_print, uag_custom_hdrs(false), sr->fmt);
 }
 
 

@@ -253,24 +253,190 @@ static int cmd_sip_debug(struct re_printf *pf, void *unused)
 	return sip_debug(pf, uag_sip());
 }
 
+static bool str_eq(const char *a, const char *b)
+{
+	return 0 == str_casecmp(a, b);
+}
+
+
+static const char *skipws(const char *p)
+{
+	while (p && (*p == ' ' || *p == '\t'))
+		++p;
+	return p;
+}
+
+
+static int split_word(const char *s, char *word, size_t wsz,
+			      const char **restp)
+{
+	size_t n = 0;
+
+	s = skipws(s);
+	if (!str_isset(s))
+		return EINVAL;
+
+	while (s[n] && s[n] != ' ' && s[n] != '\t')
+		++n;
+
+	if (n + 1 > wsz)
+		return ENOMEM;
+
+	(void)re_snprintf(word, wsz, "%.*s", (int)n, s);
+	*restp = skipws(s + n);
+	return 0;
+}
+
+
 static int cmd_sip_trace(struct re_printf *pf, void *arg)
 {
 	struct cmd_arg *carg = arg;
 	const char *prm = carg->prm;
+	char cmd[32];
+	const char *rest;
+	int err;
 
-	/* assume false since the trace state is not exposed from libre */
-	static bool enabled = false;
+	if (!str_isset(prm)) {
+		uag_enable_sip_trace(!uag_sip_trace_enabled());
+		return uag_sip_trace_debug(pf);
+	}
 
-	if (prm)
+	err = split_word(prm, cmd, sizeof(cmd), &rest);
+	if (err)
+		return err;
+
+	if (str_eq(cmd, "on") || str_eq(cmd, "yes") || str_eq(cmd, "true")) {
+		uag_enable_sip_trace(true);
+	}
+	else if (str_eq(cmd, "off") || str_eq(cmd, "no") ||
+		 str_eq(cmd, "false")) {
+		uag_enable_sip_trace(false);
+	}
+	else if (str_eq(cmd, "file")) {
+		if (!str_isset(rest))
+			return re_hprintf(pf, "usage: /siptrace file PATH\n");
+		err = uag_sip_trace_file_set(rest);
+		if (err)
+			return re_hprintf(pf, "siptrace file failed: %m\n", err);
+	}
+	else if (str_eq(cmd, "stdout")) {
+		uag_sip_trace_stdout();
+	}
+	else if (str_eq(cmd, "status")) {
+		;
+	}
+	else {
+		bool enabled = uag_sip_trace_enabled();
 		str_bool(&enabled, prm);
-	else
-		enabled = !enabled;
+		uag_enable_sip_trace(enabled);
+	}
 
-	re_hprintf(pf, "debug_cmd: SIP trace is now %s\n",
-		enabled ? "enabled" : "disabled");
-	uag_enable_sip_trace(enabled);
+	return uag_sip_trace_debug(pf);
+}
 
-	return 0;
+
+static int cmd_siphdr_common(struct re_printf *pf, const char *prm, bool reg)
+{
+	char cmd[32];
+	char name[128];
+	const char *rest;
+	int err;
+
+	if (!str_isset(prm))
+		return uag_custom_hdr_debug(pf, reg);
+
+	err = split_word(prm, cmd, sizeof(cmd), &rest);
+	if (err)
+		return err;
+
+	if (str_eq(cmd, "list"))
+		return uag_custom_hdr_debug(pf, reg);
+
+	if (str_eq(cmd, "clear")) {
+		uag_custom_hdr_clear(reg);
+		return re_hprintf(pf, "%s headers cleared\n",
+				  reg ? "REGISTER" : "global SIP");
+	}
+
+	if (str_eq(cmd, "del") || str_eq(cmd, "rm") || str_eq(cmd, "remove")) {
+		err = split_word(rest, name, sizeof(name), &rest);
+		if (err)
+			return re_hprintf(pf, "usage: /%s del Header-Name\n",
+					  reg ? "reghdr" : "siphdr");
+
+		err = uag_custom_hdr_remove(reg, name);
+		if (err)
+			return re_hprintf(pf, "header not found: %s\n", name);
+
+		return re_hprintf(pf, "removed %s\n", name);
+	}
+
+	if (str_eq(cmd, "add")) {
+		if (!str_isset(rest))
+			return re_hprintf(pf,
+				"usage: /%s add Header-Name: value\n",
+				reg ? "reghdr" : "siphdr");
+
+		err = uag_custom_hdr_add_line(reg, rest);
+		if (err)
+			return re_hprintf(pf, "could not add header: %m\n", err);
+
+		return re_hprintf(pf, "added %s header\n",
+				  reg ? "REGISTER" : "global SIP");
+	}
+
+	err = uag_custom_hdr_add_line(reg, prm);
+	if (err)
+		return re_hprintf(pf,
+			"usage: /%s [list|clear|add Header: value|del Header]\n",
+			reg ? "reghdr" : "siphdr");
+
+	return re_hprintf(pf, "added %s header\n",
+			  reg ? "REGISTER" : "global SIP");
+}
+
+
+static int cmd_siphdr(struct re_printf *pf, void *arg)
+{
+	struct cmd_arg *carg = arg;
+	return cmd_siphdr_common(pf, carg->prm, false);
+}
+
+
+static int cmd_reghdr(struct re_printf *pf, void *arg)
+{
+	struct cmd_arg *carg = arg;
+	return cmd_siphdr_common(pf, carg->prm, true);
+}
+
+
+static int cmd_calldump(struct re_printf *pf, void *arg)
+{
+	struct cmd_arg *carg = arg;
+	struct le *le;
+	int err = 0;
+	bool all = false;
+
+	if (str_isset(carg->prm) && 0 == str_casecmp(carg->prm, "all"))
+		all = true;
+
+	for (le = list_head(uag_list()); le; le = le->next) {
+		struct ua *ua = le->data;
+		struct le *lec;
+
+		for (lec = list_head(ua_calls(ua)); lec; lec = lec->next) {
+			struct call *call = lec->data;
+			if (all)
+				err |= call_debug_full(pf, call);
+			else
+				err |= call_debug_sip(pf, call);
+		}
+	}
+
+	if (!uag_call_count())
+		err |= re_hprintf(pf, "(no active calls)\n");
+
+	return err;
 }
 
 
@@ -335,8 +501,11 @@ static const struct cmd debugcmdv[] = {
 {"modules",     0,       0, "Module debug",           mod_debug           },
 {"netstat",    'n',      0, "Network debug",          cmd_net_debug       },
 {"play",        0, CMD_PRM, "Play audio file",        cmd_play_file       },
+{"reghdr",      0, CMD_PRM, "REGISTER SIP headers",   cmd_reghdr          },
+{"siphdr",      0, CMD_PRM, "Global SIP headers",     cmd_siphdr          },
 {"sipstat",    'i',      0, "SIP debug",              cmd_sip_debug       },
 {"siptrace",    0, CMD_PRM, "SIP trace",              cmd_sip_trace       },
+{"calldump",    0, CMD_PRM, "Call SIP/media dump",    cmd_calldump        },
 {"sysinfo",    's',      0, "System info",            print_system_info   },
 {"timers",      0,       0, "Timer debug",            tmr_status          },
 {"uastat",     'u',      0, "UA debug",               cmd_ua_debug        },

@@ -244,6 +244,8 @@ int  call_transfer(struct call *call, const char *uri);
 int  call_replace_transfer(struct call *call, struct call *source_call);
 int  call_status(struct re_printf *pf, const struct call *call);
 int  call_debug(struct re_printf *pf, const struct call *call);
+int  call_debug_full(struct re_printf *pf, const struct call *call);
+int  call_debug_sip(struct re_printf *pf, const struct call *call);
 int  call_notify_sipfrag(struct call *call, uint16_t scode,
 			 const char *reason, ...);
 void call_set_handlers(struct call *call, call_event_h *eh,
@@ -1024,6 +1026,16 @@ void uag_set_nodial(bool nodial);
 bool uag_nodial(void);
 void uag_set_exit_handler(ua_exit_h *exith, void *arg);
 void uag_enable_sip_trace(bool enable);
+bool uag_sip_trace_enabled(void);
+int  uag_sip_trace_file_set(const char *path);
+void uag_sip_trace_stdout(void);
+int  uag_sip_trace_debug(struct re_printf *pf);
+int  uag_custom_hdr_add(bool reg, const char *name, const char *value);
+int  uag_custom_hdr_add_line(bool reg, const char *line);
+int  uag_custom_hdr_remove(bool reg, const char *name);
+void uag_custom_hdr_clear(bool reg);
+int  uag_custom_hdr_debug(struct re_printf *pf, bool reg);
+const struct list *uag_custom_hdrs(bool reg);
 int  uag_reset_transp(bool reg, bool reinvite);
 void uag_set_sub_handler(sip_msg_h *subh);
 int  uag_set_extra_params(const char *eprm);

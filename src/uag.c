@@ -4,6 +4,7 @@
  * Copyright (C) 2010 Alfred E. Heggestad
  */
 
+#include <errno.h>
 #include <string.h>
 #include <re.h>
 #include <baresip.h>
@@ -527,21 +528,221 @@ static bool sub_handler(const struct sip_msg *msg, void *arg)
 }
 
 
+const struct list *uag_custom_hdrs(bool reg)
+{
+	return reg ? &uag.custom_reg_hdrs : &uag.custom_hdrs;
+}
+
+
+static struct list *uag_custom_hdrs_mut(bool reg)
+{
+	return reg ? &uag.custom_reg_hdrs : &uag.custom_hdrs;
+}
+
+
+static bool hdr_has_bad_chars(const char *s)
+{
+	return s && (strchr(s, '\r') || strchr(s, '\n'));
+}
+
+
+int uag_custom_hdr_add(bool reg, const char *name, const char *value)
+{
+	struct list *hdrs = uag_custom_hdrs_mut(reg);
+
+	if (!str_isset(name) || !str_isset(value))
+		return EINVAL;
+
+	if (hdr_has_bad_chars(name) || hdr_has_bad_chars(value))
+		return EINVAL;
+
+	return custom_hdrs_add(hdrs, name, "%s", value);
+}
+
+
+int uag_custom_hdr_add_line(bool reg, const char *line)
+{
+	char *name = NULL;
+	char *value = NULL;
+	const char *p;
+	int err;
+
+	if (!str_isset(line))
+		return EINVAL;
+
+	if (hdr_has_bad_chars(line))
+		return EINVAL;
+
+	p = strchr(line, ':');
+	if (p) {
+		const char *v = p + 1;
+
+		while (*v == ' ' || *v == '\t')
+			++v;
+
+		err  = re_sdprintf(&name, "%.*s", (int)(p - line), line);
+		err |= re_sdprintf(&value, "%s", v);
+	}
+	else {
+		struct pl n, v;
+		err = re_regex(line, str_len(line), "[^ \t]+[ \t]+[^]+", &n, &v);
+		if (err)
+			return err;
+
+		err  = pl_strdup(&name, &n);
+		err |= pl_strdup(&value, &v);
+	}
+
+	if (!err)
+		err = uag_custom_hdr_add(reg, name, value);
+
+	mem_deref(name);
+	mem_deref(value);
+	return err;
+}
+
+
+int uag_custom_hdr_remove(bool reg, const char *name)
+{
+	struct list *hdrs = uag_custom_hdrs_mut(reg);
+	struct le *le;
+	unsigned n = 0;
+	struct pl npl;
+
+	if (!str_isset(name))
+		return EINVAL;
+
+	pl_set_str(&npl, name);
+	le = list_head(hdrs);
+	while (le) {
+		struct sip_hdr *hdr = le->data;
+		le = le->next;
+
+		if (0 == pl_strcasecmp(&hdr->name, &npl)) {
+			list_unlink(&hdr->le);
+			mem_deref(hdr);
+			++n;
+		}
+	}
+
+	return n ? 0 : ENOENT;
+}
+
+
+void uag_custom_hdr_clear(bool reg)
+{
+	list_flush(uag_custom_hdrs_mut(reg));
+}
+
+
+static int hdr_debug_helper(const struct pl *name, const struct pl *val,
+				    void *arg)
+{
+	struct re_printf *pf = arg;
+	return re_hprintf(pf, "%r: %r\n", name, val);
+}
+
+
+int uag_custom_hdr_debug(struct re_printf *pf, bool reg)
+{
+	const struct list *hdrs = uag_custom_hdrs(reg);
+
+	if (list_isempty(hdrs))
+		return re_hprintf(pf, "(no %s SIP headers)\n",
+				  reg ? "REGISTER" : "global");
+
+	return custom_hdrs_apply(hdrs, hdr_debug_helper, pf);
+}
+
+
+static void trace_write(const char *fmt, ...)
+{
+	va_list ap;
+	FILE *f = (FILE *)uag.sip_trace_file;
+
+	va_start(ap, fmt);
+	if (f) {
+		(void)re_vfprintf(f, fmt, ap);
+		(void)fflush(f);
+	}
+	else {
+		(void)re_vprintf(fmt, ap);
+	}
+	va_end(ap);
+}
+
+
 static void sip_trace_handler(bool tx, enum sip_transp tp,
 			      const struct sa *src, const struct sa *dst,
 			      const uint8_t *pkt, size_t len, void *arg)
 {
-	(void)tx;
 	(void)arg;
 
-	re_printf("\x1b[36;1m"
-		  "%H#\n"
-		  "%s %J -> %J\n"
-		  "%b"
-		  "\x1b[;m\n"
-		  ,
-		  fmt_timestamp, NULL,
-		  sip_transp_name(tp), src, dst, pkt, len);
+	if (uag.sip_trace_file || !uag.sip_trace_color) {
+		trace_write("%H# %s %s %J -> %J\n%b\n",
+			    fmt_timestamp, NULL,
+			    tx ? "TX" : "RX", sip_transp_name(tp),
+			    src, dst, pkt, len);
+	}
+	else {
+		trace_write("\x1b[36;1m"
+			    "%H# %s %s %J -> %J\n"
+			    "%b"
+			    "\x1b[;m\n",
+			    fmt_timestamp, NULL,
+			    tx ? "TX" : "RX", sip_transp_name(tp),
+			    src, dst, pkt, len);
+	}
+}
+
+
+void uag_enable_sip_trace(bool enable)
+{
+	uag.sip_trace_enabled = enable;
+	sip_set_trace_handler(uag.sip, enable ? sip_trace_handler : NULL);
+}
+
+
+bool uag_sip_trace_enabled(void)
+{
+	return uag.sip_trace_enabled;
+}
+
+
+int uag_sip_trace_file_set(const char *path)
+{
+	FILE *f;
+
+	if (!str_isset(path))
+		return EINVAL;
+
+	f = fopen(path, "a");
+	if (!f)
+		return errno;
+
+	if (uag.sip_trace_file)
+		fclose((FILE *)uag.sip_trace_file);
+	uag.sip_trace_file = f;
+
+	uag.sip_trace_path = mem_deref(uag.sip_trace_path);
+	return str_dup(&uag.sip_trace_path, path);
+}
+
+
+void uag_sip_trace_stdout(void)
+{
+	if (uag.sip_trace_file)
+		fclose((FILE *)uag.sip_trace_file);
+	uag.sip_trace_file = NULL;
+	uag.sip_trace_path = mem_deref(uag.sip_trace_path);
+}
+
+
+int uag_sip_trace_debug(struct re_printf *pf)
+{
+	return re_hprintf(pf, "SIP trace: %s, sink: %s\n",
+			  uag.sip_trace_enabled ? "on" : "off",
+			  uag.sip_trace_path ? uag.sip_trace_path : "stdout");
 }
 
 
@@ -590,6 +791,10 @@ int ua_init(const char *software, bool udp, bool tcp, bool tls)
 		goto out;
 	}
 
+	list_init(&uag.custom_hdrs);
+	list_init(&uag.custom_reg_hdrs);
+	uag.sip_trace_color = true;
+
 	err = ua_transp_addall(net);
 	if (err)
 		goto out;
@@ -626,6 +831,11 @@ void ua_close(void)
 	uag.sock     = mem_deref(uag.sock);
 	uag.lsnr     = mem_deref(uag.lsnr);
 	uag.sip      = mem_deref(uag.sip);
+	uag_sip_trace_stdout();
+	list_flush(&uag.custom_hdrs);
+	list_flush(&uag.custom_reg_hdrs);
+	uag.sip_trace_enabled = false;
+	uag.sip_trace_color = true;
 	uag.eprm     = mem_deref(uag.eprm);
 
 #ifdef USE_TLS
@@ -686,18 +896,6 @@ void uag_set_exit_handler(ua_exit_h *exith, void *arg)
 	uag.exith = exith;
 	uag.arg = arg;
 }
-
-
-/**
- * Enable SIP message tracing
- *
- * @param enable True to enable, false to disable
- */
-void uag_enable_sip_trace(bool enable)
-{
-	sip_set_trace_handler(uag.sip, enable ? sip_trace_handler : NULL);
-}
-
 
 /**
  * Reset the SIP transports for all User-Agents

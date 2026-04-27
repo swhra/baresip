@@ -79,6 +79,13 @@ struct call {
 	uint32_t rtp_timeout_ms;  /**< RTP Timeout in [ms]                  */
 	uint32_t linenum;         /**< Line number from 1 to N              */
 	struct list custom_hdrs;  /**< List of custom headers if any        */
+	char *last_sip_status;   /**< Last SIP status line                 */
+	char *last_remote_sdp;   /**< Last received SDP                    */
+	char *last_local_sdp;    /**< Last sent SDP                        */
+	char *last_contact;      /**< Last Contact header                  */
+	char *last_record_route; /**< Last Record-Route header             */
+	char *last_twilio_callsid; /**< Last X-Twilio-CallSid header        */
+	char *last_twilio_error; /**< Last X-Twilio-Error header           */
 
 	enum sdp_dir estadir;      /**< Established audio direction         */
 	enum sdp_dir estvdir;      /**< Established video direction         */
@@ -363,6 +370,13 @@ static void call_destructor(void *arg)
 	mem_deref(call->mencs);
 	mem_deref(call->sub);
 	mem_deref(call->not);
+	mem_deref(call->last_sip_status);
+	mem_deref(call->last_remote_sdp);
+	mem_deref(call->last_local_sdp);
+	mem_deref(call->last_contact);
+	mem_deref(call->last_record_route);
+	mem_deref(call->last_twilio_callsid);
+	mem_deref(call->last_twilio_error);
 	mem_deref(call->acc);
 	mem_deref(call->user_data);
 
@@ -1015,6 +1029,73 @@ const struct list *call_get_custom_hdrs(const struct call *call)
 		return NULL;
 
 	return &call->custom_hdrs;
+}
+
+
+
+static void call_save_pl(char **dst, const struct pl *pl)
+{
+	if (!dst)
+		return;
+
+	*dst = mem_deref(*dst);
+	if (pl_isset(pl))
+		(void)pl_strdup(dst, pl);
+}
+
+
+static void call_save_hdrs(struct call *call, const struct sip_msg *msg)
+{
+	const struct sip_hdr *hdr;
+
+	if (!call || !msg)
+		return;
+
+	mem_deref(call->last_sip_status);
+	call->last_sip_status = NULL;
+	if (msg->scode)
+		(void)re_sdprintf(&call->last_sip_status, "%u %r",
+				  msg->scode, &msg->reason);
+
+	hdr = sip_msg_hdr(msg, SIP_HDR_CONTACT);
+	if (hdr)
+		call_save_pl(&call->last_contact, &hdr->val);
+
+	hdr = sip_msg_hdr(msg, SIP_HDR_RECORD_ROUTE);
+	if (hdr)
+		call_save_pl(&call->last_record_route, &hdr->val);
+
+	hdr = sip_msg_xhdr(msg, "X-Twilio-CallSid");
+	if (hdr)
+		call_save_pl(&call->last_twilio_callsid, &hdr->val);
+
+	hdr = sip_msg_xhdr(msg, "X-Twilio-Error");
+	if (hdr)
+		call_save_pl(&call->last_twilio_error, &hdr->val);
+}
+
+
+static void call_save_sdp(char **dst, const struct mbuf *mb)
+{
+	if (!dst)
+		return;
+
+	*dst = mem_deref(*dst);
+	if (mb && mbuf_get_left(mb))
+		(void)re_sdprintf(dst, "%b", mbuf_buf(mb), mbuf_get_left(mb));
+}
+
+
+static void call_save_local_sdp(struct call *call, const struct mbuf *mb)
+{
+	call_save_sdp(call ? &call->last_local_sdp : NULL, mb);
+}
+
+
+static void call_save_remote_sdp(struct call *call, const struct sip_msg *msg)
+{
+	if (msg)
+		call_save_sdp(call ? &call->last_remote_sdp : NULL, msg->mb);
 }
 
 
@@ -1898,6 +1979,8 @@ static int sipsess_offer_handler(struct mbuf **descp,
 	int err;
 
 	MAGIC_CHECK(call);
+	call_save_hdrs(call, msg);
+	call_save_remote_sdp(call, msg);
 
 	if (got_offer) {
 		enum bevent_ev hold_ev;
@@ -1937,6 +2020,8 @@ static int sipsess_offer_handler(struct mbuf **descp,
 	if (err)
 		return err;
 
+	call_save_local_sdp(call, *descp);
+
 	err = bevent_call_emit(BEVENT_CALL_LOCAL_SDP, call, "%s",
 			       got_offer ? "answer" : "offer");
 	return err;
@@ -1952,6 +2037,8 @@ static int sipsess_answer_handler(const struct sip_msg *msg, void *arg)
 	const enum sdp_dir old_rdir = sdp_media_rdir(m);
 
 	MAGIC_CHECK(call);
+	call_save_hdrs(call, msg);
+	call_save_remote_sdp(call, msg);
 
 	debug("call: got SDP answer (%zu bytes)\n", mbuf_get_left(msg->mb));
 
@@ -2207,6 +2294,7 @@ static void sipsess_close_handler(int err, const struct sip_msg *msg,
 		}
 	}
 	else if (msg) {
+		call_save_hdrs(call, msg);
 
 		call->scode = msg->scode;
 
@@ -2532,6 +2620,8 @@ static void sipsess_progr_handler(const struct sip_msg *msg, void *arg)
 	bool media;
 
 	MAGIC_CHECK(call);
+	call_save_hdrs(call, msg);
+	call_save_remote_sdp(call, msg);
 
 	info("call: SIP Progress: %u %r (%r/%r)\n",
 	     msg->scode, &msg->reason, &msg->ctyp.type, &msg->ctyp.subtype);
@@ -2626,6 +2716,8 @@ static int sipsess_desc_handler(struct mbuf **descp, const struct sa *src,
 	err = call_sdp_get(call, descp, true);
 	if (err)
 		return err;
+
+	call_save_local_sdp(call, *descp);
 #if 0
 	info("- - - - - S D P - O f f e r - - - - -\n"
 	     "%b"
@@ -2678,11 +2770,12 @@ static int send_invite(struct call *call)
 			      sipsess_info_handler,
 			      call->acc->refer ? sipsess_refer_handler : NULL,
 			      sipsess_close_handler, call,
-			      "Allow: %H\r\n%H%H%H%H",
+			      "Allow: %H\r\n%H%H%H%H%H",
 			      ua_print_allowed, call->ua,
 			      ua_print_supported, call->ua,
 			      ua_print_require, call->ua,
 			      call_print_replaces, call,
+			      custom_hdrs_print, uag_custom_hdrs(false),
 			      custom_hdrs_print, &call->custom_hdrs);
 	if (err) {
 		warning("call: sipsess_connect: %m\n", err);
@@ -3518,4 +3611,61 @@ bool call_sdp_change_allowed(const struct call *call)
 		&& sdp_state == SDP_NEG_DONE)
 		|| (sdp_state == SDP_NEG_NONE
 		|| sdp_state == SDP_NEG_REMOTE_OFFER);
+}
+
+
+
+int call_debug_sip(struct re_printf *pf, const struct call *call)
+{
+	int err = 0;
+
+	if (!call)
+		return 0;
+
+	err |= re_hprintf(pf, "\n--- Call SIP debug ---\n");
+	err |= re_hprintf(pf, "id:             %s\n", call->id);
+	err |= re_hprintf(pf, "state:          %s\n", state_name(call->state));
+	err |= re_hprintf(pf, "local_uri:      %s\n", call->local_uri);
+	err |= re_hprintf(pf, "peer_uri:       %s\n", call->peer_uri);
+	err |= re_hprintf(pf, "peer_contact:   %s\n", call->contact_uri);
+	err |= re_hprintf(pf, "last_status:    %s\n", call->last_sip_status);
+	err |= re_hprintf(pf, "last_contact:   %s\n", call->last_contact);
+	err |= re_hprintf(pf, "record_route:   %s\n", call->last_record_route);
+	err |= re_hprintf(pf, "twilio_callsid: %s\n", call->last_twilio_callsid);
+	err |= re_hprintf(pf, "twilio_error:   %s\n", call->last_twilio_error);
+
+	if (call->last_local_sdp)
+		err |= re_hprintf(pf, "\n--- Last local SDP ---\n%s\n",
+				  call->last_local_sdp);
+	if (call->last_remote_sdp)
+		err |= re_hprintf(pf, "\n--- Last remote SDP ---\n%s\n",
+				  call->last_remote_sdp);
+
+	return err;
+}
+
+
+int call_debug_full(struct re_printf *pf, const struct call *call)
+{
+	struct le *le;
+	int err;
+
+	if (!call)
+		return 0;
+
+	err = call_debug(pf, call);
+	err |= call_debug_sip(pf, call);
+
+	err |= re_hprintf(pf, "\n--- Call media streams ---\n");
+	for (le = call->streaml.head; le; le = le->next) {
+		struct stream *strm = le->data;
+		err |= stream_debug(pf, strm);
+	}
+
+	if (call->audio)
+		err |= audio_debug(pf, call->audio);
+	if (call->video)
+		err |= video_debug(pf, call->video);
+
+	return err;
 }
