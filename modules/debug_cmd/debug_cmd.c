@@ -3,6 +3,7 @@
  *
  * Copyright (C) 2010 - 2016 Alfred E. Heggestad
  */
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -253,114 +254,167 @@ static int cmd_sip_debug(struct re_printf *pf, void *unused)
 	return sip_debug(pf, uag_sip());
 }
 
-static bool str_eq(const char *a, const char *b)
+
+static bool lab_str_eq(const char *a, const char *b)
 {
 	return 0 == str_casecmp(a, b);
 }
 
 
-static const char *skipws(const char *p)
+
+static int lab_ncasecmp(const char *a, const char *b, size_t n)
 {
-	while (p && (*p == ' ' || *p == '\t'))
+	size_t i;
+
+	if (!a || !b)
+		return a == b ? 0 : a ? 1 : -1;
+
+	for (i = 0; i < n; ++i) {
+		unsigned char ca = (unsigned char)a[i];
+		unsigned char cb = (unsigned char)b[i];
+
+		if (!ca || !cb || tolower((unsigned char)ca) != tolower((unsigned char)cb))
+			return (int)tolower((unsigned char)ca) - (int)tolower((unsigned char)cb);
+	}
+
+	return 0;
+}
+
+static const char *lab_skipws(const char *p)
+{
+	while (p && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n'))
 		++p;
 	return p;
 }
 
 
-static int split_word(const char *s, char *word, size_t wsz,
-			      const char **restp)
+static int lab_split_word(const char *s, char *word, size_t wsz,
+			  const char **restp)
 {
 	size_t n = 0;
 
-	s = skipws(s);
+	s = lab_skipws(s);
 	if (!str_isset(s))
 		return EINVAL;
 
-	while (s[n] && s[n] != ' ' && s[n] != '\t')
+	while (s[n] && s[n] != ' ' && s[n] != '\t' &&
+	       s[n] != '\r' && s[n] != '\n')
 		++n;
 
 	if (n + 1 > wsz)
 		return ENOMEM;
 
 	(void)re_snprintf(word, wsz, "%.*s", (int)n, s);
-	*restp = skipws(s + n);
+	*restp = lab_skipws(s + n);
 	return 0;
 }
-
 
 static int cmd_sip_trace(struct re_printf *pf, void *arg)
 {
 	struct cmd_arg *carg = arg;
-	const char *prm = carg->prm;
-	char cmd[32];
-	const char *rest;
-	int err;
+	const char *prm = carg ? carg->prm : NULL;
 
 	if (!str_isset(prm)) {
 		uag_enable_sip_trace(!uag_sip_trace_enabled());
 		return uag_sip_trace_debug(pf);
 	}
 
-	err = split_word(prm, cmd, sizeof(cmd), &rest);
-	if (err)
-		return err;
+	prm = lab_skipws(prm);
 
-	if (str_eq(cmd, "on") || str_eq(cmd, "yes") || str_eq(cmd, "true")) {
+	if (0 == str_casecmp(prm, "on") ||
+	    0 == str_casecmp(prm, "yes") ||
+	    0 == str_casecmp(prm, "true")) {
 		uag_enable_sip_trace(true);
+		return uag_sip_trace_debug(pf);
 	}
-	else if (str_eq(cmd, "off") || str_eq(cmd, "no") ||
-		 str_eq(cmd, "false")) {
+
+	if (0 == str_casecmp(prm, "off") ||
+	    0 == str_casecmp(prm, "no") ||
+	    0 == str_casecmp(prm, "false")) {
 		uag_enable_sip_trace(false);
+		return uag_sip_trace_debug(pf);
 	}
-	else if (str_eq(cmd, "file")) {
-		if (!str_isset(rest))
+
+	if (0 == str_casecmp(prm, "stdout")) {
+		uag_sip_trace_stdout();
+		return uag_sip_trace_debug(pf);
+	}
+
+	if (0 == str_casecmp(prm, "status"))
+		return uag_sip_trace_debug(pf);
+
+	if (0 == lab_ncasecmp(prm, "file ", 5)) {
+		const char *file = lab_skipws(prm + 5);
+		int err;
+
+		if (!str_isset(file))
 			return re_hprintf(pf, "usage: /siptrace file PATH\n");
-		err = uag_sip_trace_file_set(rest);
+
+		err = uag_sip_trace_file_set(file);
 		if (err)
 			return re_hprintf(pf, "siptrace file failed: %m\n", err);
-	}
-	else if (str_eq(cmd, "stdout")) {
-		uag_sip_trace_stdout();
-	}
-	else if (str_eq(cmd, "status")) {
-		;
-	}
-	else {
-		bool enabled = uag_sip_trace_enabled();
-		str_bool(&enabled, prm);
-		uag_enable_sip_trace(enabled);
+
+		return uag_sip_trace_debug(pf);
 	}
 
-	return uag_sip_trace_debug(pf);
+	if (prm[0] == '/' || prm[0] == '.') {
+		int err = uag_sip_trace_file_set(prm);
+		if (err)
+			return re_hprintf(pf, "siptrace file failed: %m\n", err);
+
+		return uag_sip_trace_debug(pf);
+	}
+
+	return re_hprintf(pf,
+		"usage: /siptrace [on|off|status|stdout|file PATH]\n");
 }
-
 
 static int cmd_siphdr_common(struct re_printf *pf, const char *prm, bool reg)
 {
-	char cmd[32];
-	char name[128];
-	const char *rest;
+	const char *name;
 	int err;
 
 	if (!str_isset(prm))
 		return uag_custom_hdr_debug(pf, reg);
 
-	err = split_word(prm, cmd, sizeof(cmd), &rest);
-	if (err)
-		return err;
+	prm = lab_skipws(prm);
 
-	if (str_eq(cmd, "list"))
+	if (0 == str_casecmp(prm, "list"))
 		return uag_custom_hdr_debug(pf, reg);
 
-	if (str_eq(cmd, "clear")) {
+	if (0 == str_casecmp(prm, "clear")) {
 		uag_custom_hdr_clear(reg);
 		return re_hprintf(pf, "%s headers cleared\n",
 				  reg ? "REGISTER" : "global SIP");
 	}
 
-	if (str_eq(cmd, "del") || str_eq(cmd, "rm") || str_eq(cmd, "remove")) {
-		err = split_word(rest, name, sizeof(name), &rest);
+	if (0 == lab_ncasecmp(prm, "add ", 4)) {
+		const char *line = lab_skipws(prm + 4);
+
+		if (!str_isset(line))
+			return re_hprintf(pf,
+				"usage: /%s add Header-Name: value\n",
+				reg ? "reghdr" : "siphdr");
+
+		err = uag_custom_hdr_add_line(reg, line);
 		if (err)
+			return re_hprintf(pf, "could not add header: %m\n", err);
+
+		return re_hprintf(pf, "added %s header\n",
+				  reg ? "REGISTER" : "global SIP");
+	}
+
+	if (0 == lab_ncasecmp(prm, "del ", 4) ||
+	    0 == lab_ncasecmp(prm, "rm ", 3) ||
+	    0 == lab_ncasecmp(prm, "remove ", 7)) {
+		if (0 == lab_ncasecmp(prm, "del ", 4))
+			name = lab_skipws(prm + 4);
+		else if (0 == lab_ncasecmp(prm, "rm ", 3))
+			name = lab_skipws(prm + 3);
+		else
+			name = lab_skipws(prm + 7);
+
+		if (!str_isset(name))
 			return re_hprintf(pf, "usage: /%s del Header-Name\n",
 					  reg ? "reghdr" : "siphdr");
 
@@ -371,13 +425,8 @@ static int cmd_siphdr_common(struct re_printf *pf, const char *prm, bool reg)
 		return re_hprintf(pf, "removed %s\n", name);
 	}
 
-	if (str_eq(cmd, "add")) {
-		if (!str_isset(rest))
-			return re_hprintf(pf,
-				"usage: /%s add Header-Name: value\n",
-				reg ? "reghdr" : "siphdr");
-
-		err = uag_custom_hdr_add_line(reg, rest);
+	if (strchr(prm, ':')) {
+		err = uag_custom_hdr_add_line(reg, prm);
 		if (err)
 			return re_hprintf(pf, "could not add header: %m\n", err);
 
@@ -385,16 +434,10 @@ static int cmd_siphdr_common(struct re_printf *pf, const char *prm, bool reg)
 				  reg ? "REGISTER" : "global SIP");
 	}
 
-	err = uag_custom_hdr_add_line(reg, prm);
-	if (err)
-		return re_hprintf(pf,
-			"usage: /%s [list|clear|add Header: value|del Header]\n",
-			reg ? "reghdr" : "siphdr");
-
-	return re_hprintf(pf, "added %s header\n",
-			  reg ? "REGISTER" : "global SIP");
+	return re_hprintf(pf,
+		"usage: /%s [list|clear|add Header: value|del Header]\n",
+		reg ? "reghdr" : "siphdr");
 }
-
 
 static int cmd_siphdr(struct re_printf *pf, void *arg)
 {
@@ -409,6 +452,35 @@ static int cmd_reghdr(struct re_printf *pf, void *arg)
 	return cmd_siphdr_common(pf, carg->prm, true);
 }
 
+
+static int cmd_siplog(struct re_printf *pf, void *arg)
+{
+	struct cmd_arg *carg = arg;
+	unsigned n = 0;
+
+	if (str_isset(carg->prm))
+		n = (unsigned int)strtoul(carg->prm, NULL, 10);
+
+	return uag_sip_log_debug(pf, n);
+}
+
+
+static int cmd_siptransport(struct re_printf *pf, void *arg)
+{
+	struct cmd_arg *carg = arg;
+	int err;
+
+	if (!str_isset(carg->prm))
+		return re_hprintf(pf, "forced SIP transport: %s\n",
+				  uag_force_transport_name());
+
+	err = uag_force_transport_set(carg->prm);
+	if (err)
+		return re_hprintf(pf, "usage: /siptransport auto|udp|tcp|tls\n");
+
+	return re_hprintf(pf, "forced SIP transport: %s\n",
+			  uag_force_transport_name());
+}
 
 static int cmd_calldump(struct re_printf *pf, void *arg)
 {
@@ -426,10 +498,8 @@ static int cmd_calldump(struct re_printf *pf, void *arg)
 
 		for (lec = list_head(ua_calls(ua)); lec; lec = lec->next) {
 			struct call *call = lec->data;
-			if (all)
-				err |= call_debug_full(pf, call);
-			else
-				err |= call_debug_sip(pf, call);
+			err |= all ? call_debug_full(pf, call)
+				   : call_debug_sip(pf, call);
 		}
 	}
 
@@ -438,7 +508,6 @@ static int cmd_calldump(struct re_printf *pf, void *arg)
 
 	return err;
 }
-
 
 static int reload_config(struct re_printf *pf, void *arg)
 {
@@ -501,9 +570,11 @@ static const struct cmd debugcmdv[] = {
 {"modules",     0,       0, "Module debug",           mod_debug           },
 {"netstat",    'n',      0, "Network debug",          cmd_net_debug       },
 {"play",        0, CMD_PRM, "Play audio file",        cmd_play_file       },
+{"sipstat",    'i',      0, "SIP debug",              cmd_sip_debug       },
 {"reghdr",      0, CMD_PRM, "REGISTER SIP headers",   cmd_reghdr          },
 {"siphdr",      0, CMD_PRM, "Global SIP headers",     cmd_siphdr          },
-{"sipstat",    'i',      0, "SIP debug",              cmd_sip_debug       },
+{"siplog",      0, CMD_PRM, "Recent SIP packets",     cmd_siplog          },
+{"siptransport",0, CMD_PRM, "Force SIP transport",    cmd_siptransport    },
 {"siptrace",    0, CMD_PRM, "SIP trace",              cmd_sip_trace       },
 {"calldump",    0, CMD_PRM, "Call SIP/media dump",    cmd_calldump        },
 {"sysinfo",    's',      0, "System info",            print_system_info   },

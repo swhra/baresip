@@ -5,6 +5,7 @@
  */
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 #include <re.h>
 #include <baresip.h>
@@ -576,12 +577,16 @@ int uag_custom_hdr_add_line(bool reg, const char *line)
 	p = strchr(line, ':');
 	if (p) {
 		const char *v = p + 1;
+		struct pl npl;
 
 		while (*v == ' ' || *v == '\t')
 			++v;
 
-		err  = re_sdprintf(&name, "%.*s", (int)(p - line), line);
-		err |= re_sdprintf(&value, "%s", v);
+		npl.p = line;
+		npl.l = (size_t)(p - line);
+
+		err  = pl_strdup(&name, &npl);
+		err |= str_dup(&value, v);
 	}
 	else {
 		struct pl n, v;
@@ -618,7 +623,7 @@ int uag_custom_hdr_remove(bool reg, const char *name)
 		struct sip_hdr *hdr = le->data;
 		le = le->next;
 
-		if (0 == pl_strcasecmp(&hdr->name, &npl)) {
+		if (0 == pl_strcasecmp(&hdr->name, name)) {
 			list_unlink(&hdr->le);
 			mem_deref(hdr);
 			++n;
@@ -672,11 +677,101 @@ static void trace_write(const char *fmt, ...)
 }
 
 
+
+/* BARESIP_LAB_MORE: SIP packet ring and hard-ish transport choice */
+static void sip_log_store(bool tx, enum sip_transp tp,
+			  const struct sa *src, const struct sa *dst,
+			  const uint8_t *pkt, size_t len)
+{
+	char *entry = NULL;
+	unsigned ix = uag.sip_log_pos % RE_ARRAY_SIZE(uag.sip_logv);
+
+	(void)re_sdprintf(&entry, "%H# %s %s %J -> %J\n%b\n",
+			  fmt_timestamp, NULL,
+			  tx ? "TX" : "RX",
+			  sip_transp_name(tp), src, dst, pkt, len);
+
+	mem_deref(uag.sip_logv[ix]);
+	uag.sip_logv[ix] = entry;
+
+	uag.sip_log_pos = (ix + 1) % RE_ARRAY_SIZE(uag.sip_logv);
+	if (uag.sip_log_count < RE_ARRAY_SIZE(uag.sip_logv))
+		++uag.sip_log_count;
+}
+
+
+void uag_sip_log_clear(void)
+{
+	unsigned i;
+
+	for (i=0; i<RE_ARRAY_SIZE(uag.sip_logv); ++i)
+		uag.sip_logv[i] = mem_deref(uag.sip_logv[i]);
+
+	uag.sip_log_pos = 0;
+	uag.sip_log_count = 0;
+}
+
+
+int uag_sip_log_debug(struct re_printf *pf, unsigned n)
+{
+	unsigned count = uag.sip_log_count;
+	unsigned i;
+	int err = 0;
+
+	if (!count)
+		return re_hprintf(pf, "(no SIP packets logged)\n");
+
+	if (!n || n > count)
+		n = count;
+
+	for (i=0; i<n; ++i) {
+		unsigned ix = (uag.sip_log_pos + RE_ARRAY_SIZE(uag.sip_logv)
+			       - n + i) % RE_ARRAY_SIZE(uag.sip_logv);
+
+		if (uag.sip_logv[ix])
+			err |= re_hprintf(pf, "%s", uag.sip_logv[ix]);
+	}
+
+	return err;
+}
+
+
+int uag_force_transport_set(const char *name)
+{
+	if (!str_isset(name) ||
+	    0 == str_casecmp(name, "auto") ||
+	    0 == str_casecmp(name, "none")) {
+		uag.force_transp = SIP_TRANSP_NONE;
+		return 0;
+	}
+
+	if (0 == str_casecmp(name, "udp"))
+		uag.force_transp = SIP_TRANSP_UDP;
+	else if (0 == str_casecmp(name, "tcp"))
+		uag.force_transp = SIP_TRANSP_TCP;
+	else if (0 == str_casecmp(name, "tls"))
+		uag.force_transp = SIP_TRANSP_TLS;
+	else
+		return EINVAL;
+
+	return 0;
+}
+
+
+const char *uag_force_transport_name(void)
+{
+	return uag.force_transp == SIP_TRANSP_NONE
+		? "auto" : sip_transp_name(uag.force_transp);
+}
+/* /BARESIP_LAB_MORE */
+
 static void sip_trace_handler(bool tx, enum sip_transp tp,
 			      const struct sa *src, const struct sa *dst,
 			      const uint8_t *pkt, size_t len, void *arg)
 {
 	(void)arg;
+
+	sip_log_store(tx, tp, src, dst, pkt, len);
 
 	if (uag.sip_trace_file || !uag.sip_trace_color) {
 		trace_write("%H# %s %s %J -> %J\n%b\n",
@@ -694,7 +789,6 @@ static void sip_trace_handler(bool tx, enum sip_transp tp,
 			    src, dst, pkt, len);
 	}
 }
-
 
 void uag_enable_sip_trace(bool enable)
 {
@@ -738,13 +832,16 @@ void uag_sip_trace_stdout(void)
 }
 
 
+
 int uag_sip_trace_debug(struct re_printf *pf)
 {
-	return re_hprintf(pf, "SIP trace: %s, sink: %s\n",
+	return re_hprintf(pf,
+			  "SIP trace: %s, sink: %s, forced transport: %s, ring: %u packets\n",
 			  uag.sip_trace_enabled ? "on" : "off",
-			  uag.sip_trace_path ? uag.sip_trace_path : "stdout");
+			  uag.sip_trace_path ? uag.sip_trace_path : "stdout",
+			  uag_force_transport_name(),
+			  uag.sip_log_count);
 }
-
 
 /**
  * Initialise the User-Agent Group
@@ -831,6 +928,9 @@ void ua_close(void)
 	uag.sock     = mem_deref(uag.sock);
 	uag.lsnr     = mem_deref(uag.lsnr);
 	uag.sip      = mem_deref(uag.sip);
+
+	uag_sip_log_clear();
+	uag.force_transp = SIP_TRANSP_NONE;
 	uag_sip_trace_stdout();
 	list_flush(&uag.custom_hdrs);
 	list_flush(&uag.custom_reg_hdrs);

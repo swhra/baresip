@@ -1026,6 +1026,7 @@ void uag_set_nodial(bool nodial);
 bool uag_nodial(void);
 void uag_set_exit_handler(ua_exit_h *exith, void *arg);
 void uag_enable_sip_trace(bool enable);
+/* BARESIP_LAB_PATCH_SRA: SIP lab controls */
 bool uag_sip_trace_enabled(void);
 int  uag_sip_trace_file_set(const char *path);
 void uag_sip_trace_stdout(void);
@@ -1036,6 +1037,25 @@ int  uag_custom_hdr_remove(bool reg, const char *name);
 void uag_custom_hdr_clear(bool reg);
 int  uag_custom_hdr_debug(struct re_printf *pf, bool reg);
 const struct list *uag_custom_hdrs(bool reg);
+int  uag_force_transport_set(const char *name);
+const char *uag_force_transport_name(void);
+bool uag_sip_trace_enabled(void);
+int  uag_sip_trace_file_set(const char *path);
+void uag_sip_trace_stdout(void);
+int  uag_sip_trace_debug(struct re_printf *pf);
+int  uag_custom_hdr_add(bool reg, const char *name, const char *value);
+int  uag_custom_hdr_add_line(bool reg, const char *line);
+int  uag_custom_hdr_remove(bool reg, const char *name);
+void uag_custom_hdr_clear(bool reg);
+int  uag_custom_hdr_debug(struct re_printf *pf, bool reg);
+const struct list *uag_custom_hdrs(bool reg);
+
+/* BARESIP_LAB_MORE: public SIP lab controls */
+int  uag_sip_log_debug(struct re_printf *pf, unsigned n);
+void uag_sip_log_clear(void);
+int  uag_force_transport_set(const char *name);
+const char *uag_force_transport_name(void);
+/* /BARESIP_LAB_MORE */
 int  uag_reset_transp(bool reg, bool reinvite);
 void uag_set_sub_handler(sip_msg_h *subh);
 int  uag_set_extra_params(const char *eprm);

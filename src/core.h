@@ -183,6 +183,12 @@ void call_set_custom_hdrs(struct call *call, const struct list *hdrs);
 const struct sa *call_laddr(const struct call *call);
 int call_streams_alloc(struct call *call);
 int call_modify_nosdp(struct call *call);
+/* BARESIP_LAB_PATCH_SRA: richer call debug */
+int call_debug_full(struct re_printf *pf, const struct call *call);
+int call_debug_sip(struct re_printf *pf, const struct call *call);
+int custom_hdrs_add(struct list *hdrs, const char *name,
+		    const char *fmt, ...);
+int custom_hdrs_apply(const struct list *hdrs, custom_hdrs_h *h, void *arg);
 int call_debug_full(struct re_printf *pf, const struct call *call);
 int call_debug_sip(struct re_printf *pf, const struct call *call);
 
@@ -399,12 +405,21 @@ struct uag {
 	bool nodial;                   /**< Prevent outgoing calls          */
 	void *arg;                     /**< UA Exit handler argument        */
 	char *eprm;                    /**< Extra UA parameters             */
+	/* BARESIP_LAB_PATCH_SRA: global SIP lab state */
 	struct list custom_hdrs;        /**< Global out-of-dialog/call hdrs  */
 	struct list custom_reg_hdrs;    /**< Global REGISTER headers         */
 	bool sip_trace_enabled;         /**< SIP trace active                */
 	bool sip_trace_color;           /**< Colour SIP trace on stdout      */
 	void *sip_trace_file;           /**< Optional SIP trace FILE*        */
 	char *sip_trace_path;           /**< Path for optional trace file    */
+	enum sip_transp force_tp;       /**< Forced transport if set         */
+
+	/* BARESIP_LAB_MORE: recent SIP packet ring and transport forcing */
+	char *sip_logv[128];            /**< Recent SIP packets              */
+	unsigned sip_log_pos;           /**< Ring write position             */
+	unsigned sip_log_count;         /**< Ring population                 */
+	enum sip_transp force_transp;    /**< Forced SIP transport or none    */
+	/* /BARESIP_LAB_MORE */
 #ifdef USE_TLS
 	struct tls *tls;               /**< TLS Context                     */
 	struct tls *wss_tls;           /**< Secure websocket TLS Context    */
